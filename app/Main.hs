@@ -141,10 +141,9 @@ colorize Merged  s = "\ESC[32m" ++ s ++ "\ESC[0m"
 render :: Grid Value -> (Position -> TileStatus) -> String
 render (Store f _) status = unlines $ map (unwords . map pad_cell) rows
   where rows     = reverse [[(x, y) | x <- [0..max_size]] | y <- [0..max_size]]
-        w        = maximum $ map (length . show . f) (concat rows)
         pad_cell pos =
           let v      = f pos
-              padded = replicate (w - length (show v)) ' ' ++ show v
+              padded = replicate (4 - length (show v)) ' ' ++ show v
           in colorize (if v == 0 then Normal else status pos) padded
 
 get_direction :: IO (Maybe Direction)
