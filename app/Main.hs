@@ -1,11 +1,13 @@
-{- Implementation of 2048 using the Store Comonad -}
+{- implementation of 2048 using the store comonad -}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
 module Main where
 import           Data.MemoCombinators as Memo
+import           System.IO            (BufferMode (..), hSetBuffering, hSetEcho, stdin)
+import           System.Random        (randomRIO)
 
 class Functor w => Comonad w where
-  extract :: w a -> a
+  extract   :: w a -> a
   duplicate :: w a -> w (w a)
   duplicate = extend id
   extend :: (w a -> b) -> w a -> w b
@@ -13,23 +15,24 @@ class Functor w => Comonad w where
 
 data Store s a = Store (s -> a) s
 
-instance (Show a, Show s) => Show (Store s a) where
-  show (Store f s) = let g = Store f s in show s ++ " " ++ (show . extract) g
-
 instance Functor (Store s) where
   fmap f (Store g s) = Store (f . g) s
 
 instance Comonad (Store s) where
-  extract (Store f s) = f s
+  extract   (Store f s) = f s
   duplicate (Store f s) = Store (Store f) s
 
-data Direction = L | R | U | D deriving (Eq)
-type Position = (Int, Int)
-type Value = Int
-type Grid a = Store Position a
+data Direction  = L | R | U | D deriving (Eq)
+data TileStatus = Normal | NewTile | Merged
+type Position   = (Int, Int)
+type Value      = Int
+type Grid a     = Store Position a
 
-maxSize :: Int
-maxSize = 2
+max_size :: Int
+max_size = 3
+
+memo2d :: Memo Position
+memo2d = Memo.pair Memo.integral Memo.integral
 
 tab :: Memo s -> Store s a -> Store s a
 tab f (Store g s) = Store (f g) s
@@ -37,85 +40,144 @@ tab f (Store g s) = Store (f g) s
 experiment :: Functor f => (s -> f s) -> Store s a -> f a
 experiment f (Store g s) = fmap g (f s)
 
-rowIndices :: Direction -> Position -> [Position]
-rowIndices dir (x, y) =
+row_indices :: Direction -> Position -> [Position]
+row_indices dir (x, y) =
   case dir of
-    L -> [(x, y) | x <- [0..maxSize]]
-    R -> [(x, y) | x <- [maxSize, maxSize - 1..0]]
-    D -> [(x, y) | y <- [0..maxSize]]
-    U -> [(x, y) | y <- [maxSize, maxSize - 1..0]]
+    L -> [(c, y) | c <- [0..max_size]]
+    R -> [(c, y) | c <- [max_size, max_size - 1..0]]
+    D -> [(x, r) | r <- [0..max_size]]
+    U -> [(x, r) | r <- [max_size, max_size - 1..0]]
 
-toRow :: Direction -> Grid a -> [a]
-toRow dir = experiment (rowIndices dir)
+to_row :: Direction -> Grid a -> [a]
+to_row dir = experiment (row_indices dir)
 
-moveRow :: [Value] -> [Value]
-moveRow x = let x' = moveRow' (filter (/= 0) x) in x' ++ replicate (length x - length x') 0
-  where moveRow' [] = []
-        moveRow' [x] = [x]
-        moveRow' (x:y:xs)
-          | x == y = x + y : moveRow' xs
-          | otherwise = x : moveRow' (y:xs)
+move_row :: [Value] -> [Value]
+move_row xs = xs' ++ replicate (length xs - length xs') 0
+  where xs'              = move_row' (filter (/= 0) xs)
+        move_row' []     = []
+        move_row' [x]    = [x]
+        move_row' (x:y:rest)
+          | x == y       = x + y : move_row' rest
+          | otherwise    = x : move_row' (y : rest)
 
-gameRule :: Direction -> Grid Value -> Value
-gameRule dir (Store f s) =
+move_row_merged :: [Value] -> [Bool]
+move_row_merged xs = merged ++ replicate (length xs - length merged) False
+  where merged         = go (filter (/= 0) xs)
+        go []          = []
+        go [_]         = [False]
+        go (x:y:rest)
+          | x == y     = True : go rest
+          | otherwise  = False : go (y : rest)
+
+game_rule :: Direction -> Grid Value -> Value
+game_rule dir (Store f s) =
   case dir of
-    L -> moveRow (toRow dir g) !! x
-    R -> reverse (moveRow (toRow dir g)) !! x
-    D -> moveRow (toRow dir g) !! y
-    U -> reverse (moveRow (toRow dir g)) !! y
+    L ->         move_row (to_row dir g) !! x
+    R -> reverse (move_row (to_row dir g)) !! x
+    D ->         move_row (to_row dir g) !! y
+    U -> reverse (move_row (to_row dir g)) !! y
   where (x, y) = s
-        g = Store f s
+        g       = Store f s
 
-initialState :: Grid Value
-initialState = addNewTile $ addNewTile $ Store (const 0) (0, 0)
+game_rule_merged :: Direction -> Grid Value -> Bool
+game_rule_merged dir (Store f s) =
+  case dir of
+    L ->         move_row_merged (to_row dir g) !! x
+    R -> reverse (move_row_merged (to_row dir g)) !! x
+    D ->         move_row_merged (to_row dir g) !! y
+    U -> reverse (move_row_merged (to_row dir g)) !! y
+  where (x, y) = s
+        g       = Store f s
 
-emptyTiles :: Grid Value -> [Position]
-emptyTiles (Store f s) = filter (\x -> f x == 0) [(x, y) | x <- [0..maxSize], y <- [0..maxSize]]
+all_positions :: [Position]
+all_positions = [(x, y) | x <- [0..max_size], y <- [0..max_size]]
 
-addNewTile :: Grid Value -> Grid Value
-addNewTile (Store f s) = Store (\x -> if x == (t !! (totalScore g `mod` length t) ) then 2 else f x) s
-  where t = emptyTiles g
-        g = Store f s
+apply_move :: Direction -> Grid Value -> (Grid Value, Position -> TileStatus)
+apply_move dir g = (new_g, status)
+  where new_g              = extend (game_rule dir . tab memo2d) g
+        Store merged_f _   = tab memo2d $ extend (game_rule_merged dir . tab memo2d) g
+        status p           = if merged_f p then Merged else Normal
 
-totalScore :: Grid Value -> Int
-totalScore (Store f s) = sum [f (x, y) | x <- [0..maxSize], y <- [0..maxSize]]
+grids_equal :: Grid Value -> Grid Value -> Bool
+grids_equal (Store f1 _) (Store f2 _) = all (\p -> f1 p == f2 p) all_positions
 
-isWon :: Grid Value -> Bool
-isWon (Store f s) = 2048 `elem` ([f (x, y) | x <- [0..maxSize], y <- [0..maxSize]])
+empty_tiles :: Grid Value -> [Position]
+empty_tiles (Store f _) = filter (\p -> f p == 0) all_positions
 
-isLost :: Grid Value -> Bool
-isLost (Store f s) = null (emptyTiles (Store f s))
+add_new_tile :: Grid Value -> (Position -> TileStatus) -> IO (Grid Value, Position -> TileStatus)
+add_new_tile g@(Store f s) prev_status
+  | null t    = return (g, prev_status)
+  | otherwise = do
+      i   <- randomRIO (0, length t - 1)
+      v   <- (\r -> if (r :: Int) < 9 then 2 else 4) <$> randomRIO (0, 9)
+      let pos = t !! i
+      return (Store (\p -> if p == pos then v else f p) s,
+              \p -> if p == pos then NewTile else prev_status p)
+  where t = empty_tiles g
 
-endCondition :: Grid Value -> IO Bool
-endCondition g 
-  | isWon g = do
-    putStrLn "You won!"
-    return True
-  | isLost g = do
-    putStrLn "You lost!"
-    return True
+is_won :: Grid Value -> Bool
+is_won (Store f _) = 2048 `elem` map f all_positions
+
+is_lost :: Grid Value -> Bool
+is_lost g = null (empty_tiles g) && all (\d -> grids_equal g (apply_move_only d g)) [L, R, U, D]
+  where apply_move_only d = fst . apply_move d
+
+initial_state :: IO (Grid Value, Position -> TileStatus)
+initial_state = do
+  (g1, s1) <- add_new_tile (Store (const 0) (0, 0)) (const Normal)
+  add_new_tile g1 s1
+
+end_condition :: Grid Value -> IO Bool
+end_condition g
+  | is_won g  = putStrLn "You won!"  >> return True
+  | is_lost g = putStrLn "You lost!" >> return True
   | otherwise = return False
 
-render :: Grid Value -> String
-render g = unlines $ map (unwords . map show) $ toLists g
-    where toLists (Store f s) = reverse [[f (x, y) | x <- [0..maxSize]] | y <- [0..maxSize]]
+colorize :: TileStatus -> String -> String
+colorize Normal  s = s
+colorize NewTile s = "\ESC[31m" ++ s ++ "\ESC[0m"
+colorize Merged  s = "\ESC[32m" ++ s ++ "\ESC[0m"
 
-mainLoop :: Grid Value -> IO ()
-mainLoop g = do
-  print g
-  putStrLn (render g)
-  end <- endCondition g
-  if end
-    then return ()
-  else do
-    putStrLn "Enter a direction (l, r, u, d): "
-    dir <- getLine
-    case dir of
-      "l" -> mainLoop (addNewTile $ extend (gameRule L . tab (Memo.pair Memo.integral Memo.integral)) g)
-      "r" -> mainLoop (addNewTile $ extend (gameRule R . tab (Memo.pair Memo.integral Memo.integral)) g)
-      "u" -> mainLoop (addNewTile $ extend (gameRule U . tab (Memo.pair Memo.integral Memo.integral)) g)
-      "d" -> mainLoop (addNewTile $ extend (gameRule D . tab (Memo.pair Memo.integral Memo.integral)) g)
-      _   -> mainLoop g
+render :: Grid Value -> (Position -> TileStatus) -> String
+render (Store f _) status = unlines $ map (unwords . map pad_cell) rows
+  where rows     = reverse [[(x, y) | x <- [0..max_size]] | y <- [0..max_size]]
+        w        = maximum $ map (length . show . f) (concat rows)
+        pad_cell pos =
+          let v      = f pos
+              padded = replicate (w - length (show v)) ' ' ++ show v
+          in colorize (if v == 0 then Normal else status pos) padded
+
+get_direction :: IO (Maybe Direction)
+get_direction = getChar >>= \c -> case c of
+  'w'    -> return (Just U)
+  'a'    -> return (Just L)
+  's'    -> return (Just D)
+  'd'    -> return (Just R)
+  '\ESC' -> getChar >>= \c2 -> case c2 of
+    '[' -> getChar >>= \c3 -> case c3 of
+      'A' -> return (Just U)
+      'B' -> return (Just D)
+      'C' -> return (Just R)
+      'D' -> return (Just L)
+      _   -> return Nothing
+    _   -> return Nothing
+  _      -> return Nothing
+
+main_loop :: (Grid Value, Position -> TileStatus) -> IO ()
+main_loop (g, status) = do
+  putStrLn (render g status)
+  end <- end_condition g
+  if end then return () else do
+    input <- get_direction
+    case input of
+      Just d  -> do
+        let (g', status') = apply_move d g
+        add_new_tile g' status' >>= main_loop
+      Nothing -> main_loop (g, status)
 
 main :: IO ()
-main = mainLoop initialState
+main = do
+  hSetBuffering stdin NoBuffering
+  hSetEcho stdin False
+  putStrLn "2048 -- move with wasd or arrow keys, reach 2048 to win"
+  initial_state >>= main_loop
