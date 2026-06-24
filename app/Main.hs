@@ -165,6 +165,8 @@ get_direction = getChar >>= \c -> case c of
 
 main_loop :: (Grid Value, Position -> TileStatus) -> IO ()
 main_loop (g, status) = do
+  putStr "\ESC[2J\ESC[H"
+  putStrLn "2048 -- move with wasd or arrow keys, reach 2048 to win"
   putStrLn (render g status)
   end <- end_condition g
   if end then return () else do
@@ -179,5 +181,4 @@ main :: IO ()
 main = do
   hSetBuffering stdin NoBuffering
   hSetEcho stdin False
-  putStrLn "2048 -- move with wasd or arrow keys, reach 2048 to win"
   initial_state >>= main_loop
