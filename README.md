@@ -1,6 +1,6 @@
 # Comonadic 2048
 
-![gif of the terminal 2048 game](./images/demo.gif)
+![gif of the terminal 2048 game](./images/2048.gif)
 A terminal implementation of 2048 using the store comonad in Haskell. See the accompanying [blog post](https://www.melkyway.ca/posts/2023-08-17-comonadic2048.html) for an explanation of the approach.
 
 ## Usage
